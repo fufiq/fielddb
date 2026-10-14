@@ -1,0 +1,32 @@
+--- a/tests/test_field_storage.cpp
++++ b/tests/test_field_storage.cpp
+@@ -565,9 +565,10 @@
+     CHECK(ops[1] == storage::record_op::destroy);
+ }
+ 
+-TEST_CASE("running out of override nodes keeps the old value rather than a wrong one") {
+-    // A tiny node arena, so it is exhausted deliberately. The record must keep
+-    // reading correctly — just without the update that could not be recorded.
++TEST_CASE("running out of override nodes still applies the update") {
++    // A tiny node arena, so it is exhausted deliberately. The update is already
++    // in the log and already indexed, so dropping it would resurrect it on the
++    // next replay; instead the record is rewritten as one CREATE carrying it.
+     using tiny = storage::field_spec<"t_field_tiny.log", 1u << 20, "t_field_tiny.idx", 256, 2, 8, 256>;
+     std::remove(tiny::path.value); std::remove(tiny::index_path);
+     {
+@@ -577,13 +578,13 @@
+         auto b = t.create(quad{5, 6, 7, 8});
+         t.update<&quad::a>(a, 10);
+         t.update<&quad::b>(a, 20);   // two nodes used, the arena is now full
+-        t.update<&quad::c>(b, 30);   // refused
++        t.update<&quad::c>(b, 30);   // no node left: rewritten as a CREATE
+ 
+         quad got{};
+         REQUIRE(t.get(a, got));
+         CHECK(got.a == 10); CHECK(got.b == 20);
+         REQUIRE(t.get(b, got));
+-        CHECK(got.c == 7);           // the old value, not garbage
++        CHECK(got.c == 30);          // the update, not the old value
+         CHECK(got.a == 5);
+     }
+     std::remove(tiny::path.value); std::remove(tiny::index_path);

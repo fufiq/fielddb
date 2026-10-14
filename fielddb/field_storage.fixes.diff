@@ -1,0 +1,146 @@
+--- original/field_storage.hpp
++++ fixed/field_storage.hpp
+@@ -2407,6 +2407,9 @@
+             if (head->magic != field_index_magic || head->version != field_index_version) reset_header();
+ 
+             map_index_arena();
++            // FIX companion to index_set() no longer allocating: if the arena
++            // file could not be mapped, fall back to the heap layout here.
++            if constexpr (has_index_arena) { if (!arena_map) obs.adopt({}, true); }
+         }
+ 
+         ~field_storage() {
+@@ -2856,10 +2859,12 @@
+             // the engine's own slots.
+             reset_arena_for_replay();
+             last_record_offset = no_record_yet;
++            replaying = true;
+             const std::size_t pos = scan(base, 0, file_size, [this](record_header hdr, const std::byte* payload) {
+                 apply(hdr, payload);
+                 return true;
+             });
++            replaying = false;
+             write_offset = pos;
+             last_synced = pos;
+             head->write_offset = pos;
+@@ -2912,16 +2917,24 @@
+         std::size_t apply_wal_range(const std::byte* bytes, std::size_t len) {
+             if (!base || !len) return 0;
+             if (write_offset + len > spec::capacity) { ++refused_appends; return 0; }
+-            std::memcpy(base + write_offset, bytes, len);
+-            const std::size_t from = write_offset;
+-            const std::size_t end = scan(base, from, from + len, [this](record_header hdr, const std::byte* payload) {
+-                apply(hdr, payload);
++            // FIX (was: memcpy the whole run, scan it in place, advance
++            // write_offset only at the end). A record in the run can trigger
++            // collapse(), which appends at write_offset — i.e. on top of the
++            // records not yet scanned — tearing the tail (CRC break, slots
++            // pointing at overwritten bytes). Now each record is copied and the
++            // cursor advanced BEFORE it is applied, so anything apply() appends
++            // lands after it. Returns the INPUT bytes consumed, as before.
++            return scan(bytes, 0, len, [this](record_header hdr, const std::byte* payload) {
++                const std::size_t at = write_offset;
++                const std::size_t step = pad8(sizeof(record_header) + hdr.len);
++                if (at + step > spec::capacity) { ++refused_appends; return false; }
++                std::memcpy(base + at, payload - sizeof(record_header), sizeof(record_header) + hdr.len);
++                write_offset = at + step;
++                head->write_offset = write_offset;
++                last_record_offset = at;
++                apply(hdr, base + at + sizeof(record_header));
+                 return true;
+             });
+-            write_offset = end;
+-            head->write_offset = end;
+-            if (end > from) last_record_offset = from;   // approximate, and only used for flags
+-            return end - from;
+         }
+ 
+         // Every live record re-encoded as one contiguous CREATE, for seeding a
+@@ -3489,7 +3502,12 @@
+                 hi = nodes[n].log_offset > hi ? nodes[n].log_offset : hi;
+             }
+             const uint32_t n = alloc_node();
+-            if (n == no_override) return; // out of nodes: the record keeps its previous value rather than a wrong one
++            // FIX (was: `return;` — "the record keeps its previous value"). The
++            // update is already in the log and the observer has already indexed
++            // it, so dropping it here silently lost an acknowledged write and
++            // desynced the indexes until the next replay. Out of nodes, the
++            // record is rewritten as one CREATE that includes this update.
++            if (n == no_override) { rewrite_with(id, offset, len, at); return; }
+             // The node is filled in BEFORE the slot points at it, so a reader
+             // that follows the new head never sees an uninitialised node.
+             override_node& o = nodes[n];
+@@ -3501,14 +3519,31 @@
+             s.set_head(n);
+             s.bump_depth();
+             if constexpr (spec::max_span != 0) {
+-                if (hi - lo > spec::max_span) collapse(id);
++                if (hi - lo > spec::max_span && !replaying) collapse(id);
+             }
+         }
+ 
++        // Collapse that also lays one pending field write on top: the fallback
++        // when there is no override node left to record that write in.
++        void rewrite_with(record_id id, uint32_t offset, uint32_t len, std::size_t at) {
++            if (replaying) return;   // the original run logged this rewrite as the next CREATE
++            const uint32_t rl = slots[id].len;
++            const tag_t tag = slots[id].tag;
++            alignas(8) std::byte scratch[spec::max_record_bytes];
++            assemble(id, scratch, rl);
++            if ((std::size_t)offset + len <= rl) std::memcpy(scratch + offset, base + at, len);
++            std::byte* logged = append<record_op::create>(id, 0, tag, std::span<const std::byte>{ scratch, rl });
++            if (!logged) return;   // log full: counted in refused_appends
++            free_chain(id);
++            store_relaxed(slots[id].base, (uint64_t)(logged - base));
++            ++collapses;
++        }
++
+         // The bound on how far a read can degrade. Without it a chain grows
+         // with the number of DISTINCT fields a record has ever had touched,
+         // and a gather grows with it.
+         void maybe_collapse(record_id id) {
++            if (replaying) return;
+             if (slots[id].depth() > spec::max_depth) collapse(id);
+         }
+ 
+@@ -3621,6 +3656,11 @@
+         std::size_t last_record_offset = no_record_yet;
+         std::size_t collapses = 0, chain_compactions = 0, refused_appends = 0;
+         std::vector<std::pair<std::size_t, record_id>> sweep;
++        // FIX: true while recover() replays the log in place. Anything appended
++        // then would land at write_offset — on top of log records not yet
++        // replayed — so collapses are skipped: the original run already logged
++        // each collapse as a CREATE, which the replay applies right after.
++        bool replaying = false;
+         bool from_checkpoint = false;
+         bool index_pinned = false;
+         // The constructor maps `base`; compact() may replace it with a region
+@@ -4235,7 +4275,7 @@
+             for (std::size_t j = (i + 1) & mask; slots[j].key; j = (j + 1) & mask) {
+                 const std::size_t home = slots[j].key & mask;
+                 const bool wrapped = j < i;
+-                const bool home_between = wrapped ? (home <= i || home > j) : (home <= i && home > j);
++                const bool home_between = wrapped ? (home <= i && home > j) : (home <= i || home > j);   // FIX: branches were swapped upstream
+                 if (!home_between) continue;
+                 slots[i] = slots[j];
+                 slots[j] = slot{};
+@@ -4604,7 +4644,10 @@
+         // "did you remember to size it before the first write" to get wrong.
+         static constexpr std::size_t expected_records = records;
+ 
+-        index_set() { adopt({}, true); }
++        // FIX: upstream adopted a zero-filled HEAP copy of the whole arena
++        // here, before the engine maps the arena file — the full index in anon
++        // memory, which OOMs any out-of-RAM run. The engine adopts the file itself.
++        index_set() = default;
+ 
+         // Spans into an arena are not copyable state — a copy would leave the
+         // second object pointing into the first one's buffer, which works right
+@@ -4665,6 +4708,7 @@
+                 mapped = false;
+             } else {
+                 mapped = true;
++                std::vector<std::byte>().swap(heap);   // FIX: drop any heap copy once the file is adopted
+             }
+             index_arena arena(bytes.data(), bytes.size());
+             place_all(arena);
