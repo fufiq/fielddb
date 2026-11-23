@@ -1,14 +1,14 @@
-// business_demo_heap.cpp — тот же сценарий, что и business_demo.cpp
-// (бизнес-логика на файбере + отдельный писательский поток + очереди),
-// но поверх storage.hpp вместо record.hpp: storage::storage<user_spec> вместо
-// storage::engine<user_spec> + eng.of<user>(). Разница по существу:
-//   - нет отдельного eng.of<user>() — storage САМ и есть таблица.
-//   - user не хранит свой id внутри payload'а — индекс уже знает id,
-//     дублировать его в блобе незачем (см. обсуждение).
-//   - у user появился tag (нужен tagged_aggregate concept), назначается
-//     вручную через enum kind.
+// business_demo_heap.cpp: the same scenario as business_demo.cpp
+// (business logic on a fiber + a separate writer thread + queues),
+// but on top of storage.hpp instead of record.hpp: storage::storage<user_spec> instead of
+// storage::engine<user_spec> + eng.of<user>(). The difference in substance:
+//   - there is no separate eng.of<user>(): storage IS the table itself.
+//   - user does not store its own id inside the payload: the index already knows the id,
+//     duplicating it in the blob is pointless (see the discussion).
+//   - user gained a tag (needed by the tagged_aggregate concept), assigned
+//     by hand through the enum kind.
 //
-// Собирать: g++ -std=c++26 -O2 -pthread business_demo_heap.cpp -o business_demo_heap
+// Build: g++ -std=c++26 -O2 -pthread business_demo_heap.cpp -o business_demo_heap
 
 #include "../runtime/fiber.hpp"
 #include "../storage/storage.hpp"
@@ -35,19 +35,19 @@ mt::queue<write_req> requests;
 mt::queue<write_ack> acks;
 std::atomic<bool> running{true};
 
-// --- писательский поток: единственный, кто трогает table после старта
-// (storage<spec> строго однопоточный). ---
+// --- writer thread: the only one that touches table after startup
+// (storage<spec> is strictly single-threaded). ---
 void writer_thread(storage::storage<user_storage_spec>& table) {
     while (running.load()) {
         auto r = requests.pop_blocking();
-        if (!r) continue; // разбужены stop()'ом
+        if (!r) continue; // woken by stop()
         table.update<&user::balance>(r->user_id, r->new_balance);
-        table.sync(); // реальный msync() — здесь, не в потоке с файберами
+        table.sync(); // the real msync() is here, not in the fiber thread
         acks.push(write_ack{ r->req_id });
     }
 }
 
-// --- бизнес-логика на файбере: без изменений по сравнению с оригиналом ---
+// --- business logic on a fiber: unchanged compared with the original ---
 std::unordered_map<uint64_t, bool> completed;
 uint64_t next_req_id = 1;
 
@@ -64,23 +64,23 @@ void await(uint64_t req_id) {
 
 void transfer(storage::record_id from_id, uint64_t current_from,
               storage::record_id to_id, uint64_t current_to, uint64_t amount) {
-    printf("[transfer] списываем %llu с user#%llu\n", (unsigned long long)amount, (unsigned long long)from_id);
+    printf("[transfer] debiting %llu from user#%llu\n", (unsigned long long)amount, (unsigned long long)from_id);
     auto req1 = submit(from_id, current_from - amount);
     await(req1);
 
-    printf("[transfer] зачисляем %llu на user#%llu\n", (unsigned long long)amount, (unsigned long long)to_id);
+    printf("[transfer] crediting %llu to user#%llu\n", (unsigned long long)amount, (unsigned long long)to_id);
     auto req2 = submit(to_id, current_to + amount);
     await(req2);
 
-    printf("[transfer] готово\n");
+    printf("[transfer] done\n");
 }
 
 int main() {
     std::remove("users_demo.db");
 
-    // local_sync — storage сам открывает и маппит файл, shared_base не нужен
-    // (в отличие от старого engine, которому он был нужен ВСЕГДА, даже
-    // без единой shared/replicated таблицы).
+    // local_sync: storage opens and maps the file itself, no shared_base is needed
+    // (unlike the old engine, which ALWAYS needed it, even
+    // without a single shared/replicated table).
     storage::storage<user_storage_spec> table;
 
     auto alice = table.create(user{ 1000 });
@@ -93,7 +93,7 @@ int main() {
     sched.spawn([&] { transfer(alice, 1000, bob, 500, /*amount=*/300); });
     sched.spawn([&] {
         for (int i = 0; i < 3; ++i) {
-            printf("[background] тик %d, пока transfer ждёт диск\n", i);
+            printf("[background] tick %d while the transfer waits for the disk\n", i);
             fiber::yield();
         }
     });
@@ -105,10 +105,10 @@ int main() {
 
     running = false;
     requests.stop();
-    writer.join(); // после join() снова безопасно читать table с главного потока
+    writer.join(); // after join() it is safe to read table from the main thread again
 
     const user* a = table.get<user>(alice);
     const user* b = table.get<user>(bob);
-    printf("\nитог: alice=%llu bob=%llu\n", (unsigned long long)a->balance, (unsigned long long)b->balance);
+    printf("\nresult: alice=%llu bob=%llu\n", (unsigned long long)a->balance, (unsigned long long)b->balance);
     return (a->balance == 700 && b->balance == 800) ? 0 : 1;
 }

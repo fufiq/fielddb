@@ -1,19 +1,19 @@
-// stress_heap.cpp — аналог stress.cpp, но на storage.hpp вместо record.hpp:
-// та же структура фаз (A/B/C/recovery/D/E), плюс фаза F — специально под
-// background_compact() (Вариант 2) под конкурентной нагрузкой, которой в
-// оригинале не было (там компакция была отдельным вопросом).
+// stress_heap.cpp: the analogue of stress.cpp, but on storage.hpp instead of record.hpp:
+// the same phase structure (A/B/C/recovery/D/E), plus phase F, specifically for
+// background_compact() (Variant 2) under a concurrent load that the original
+// did not have (compaction was a separate question there).
 //
-// capacity/target уменьшены относительно оригинала (8GB/5GB) — иначе
-// сравнение занимает кучу времени/места ради того же самого вывода;
-// относительная структура фаз и паттерн нагрузки не менялись, поэтому
-// ops/sec между двумя бинарниками сравнимы напрямую.
+// capacity/target reduced relative to the original (8GB/5GB), otherwise the
+// comparison takes a lot of time and space for the same conclusion;
+// the relative phase structure and load pattern are unchanged, so the
+// ops/sec of the two binaries are directly comparable.
 //
-// Главное отличие от оригинала по сути: нет отдельного eng.of<T>() —
-// storage<spec> сам и есть таблица; T нигде не регистрируется заранее,
-// только на месте вызова; id не дублируется внутри payload (см. app::user/
-// app::account/profile — без поля id, в отличие от оригинала).
+// The main difference from the original in substance: there is no separate
+// eng.of<T>(): storage<spec> is itself the table; T is never registered in
+// advance, only at the call site; the id is not duplicated inside the payload
+// (see app::user/app::account/profile, which have no id field, unlike the original).
 //
-// Собирать: g++ -std=c++26 -O3 -march=native -pthread stress_heap.cpp -o stress_heap
+// Build: g++ -std=c++26 -O3 -march=native -pthread stress_heap.cpp -o stress_heap
 
 #include "../storage/storage.hpp"
 #include "../runtime/mt_queue.hpp"
@@ -33,12 +33,12 @@
 #include <unistd.h>
 
 namespace app {
-    // центральный enum на весь проект — единственное место, где назначаются
-    // tag'и, движок про его существование ничего не знает.
+    // one central enum for the whole project is the only place where tags are
+    // assigned; the engine knows nothing about its existence.
     enum class kind : storage::tag_t { user = 1, account = 2, profile = 3 };
 
-    // id не хранится в payload — индекс уже знает id, дублировать в блобе
-    // незачем (в отличие от оригинального record.hpp-демо).
+    // the id is not stored in the payload: the index already knows the id, no need
+    // to duplicate it in the blob (unlike the original record.hpp demo).
     struct user {
         static constexpr storage::tag_t tag = (storage::tag_t)kind::user;
         uint64_t balance;
@@ -59,8 +59,8 @@ using account_storage_spec = storage::storage_spec<storage::durability::local_sy
 
 namespace {
 
-    constexpr std::size_t capacity    = 512ull * 1024 * 1024; // было 8GB в оригинале
-    constexpr std::size_t target      = 200ull * 1024 * 1024; // было 5GB в оригинале
+    constexpr std::size_t capacity    = 512ull * 1024 * 1024; // was 8GB in the original
+    constexpr std::size_t target      = 200ull * 1024 * 1024; // was 5GB in the original
     constexpr int         n_slots     = 10;
     constexpr std::size_t n_transfers = 10'000;
 
@@ -114,9 +114,9 @@ namespace {
 } // namespace
 
 // =====================================================================
-// Фаза D: переводы на local_sync куче через writer-поток. Компакция —
-// Вариант 1 (блокирующая), запускается синхронно из post_batch-хука самого
-// writer-потока, ровно как в оригинале.
+// Phase D: transfers on a local_sync heap through a writer thread. Compaction is
+// Variant 1 (blocking), run synchronously from the post_batch hook of the
+// writer thread itself, exactly as in the original.
 // =====================================================================
 namespace transfer_bench {
 
@@ -164,7 +164,7 @@ namespace transfer_bench {
     void run(storage::storage<>& user_db, std::array<expected_slot, n_slots>& slots) {
         std::remove("stress_heap_accounts.db");
 
-        storage::storage<account_storage_spec> table; // local_sync — сам открывает файл
+        storage::storage<account_storage_spec> table; // local_sync: opens the file itself
 
         std::array<storage::record_id, n_slots> ids{};
         std::array<uint64_t, n_slots> expected_balance{};
@@ -189,7 +189,7 @@ namespace transfer_bench {
         }
         auto t1 = std::chrono::steady_clock::now();
         double submit_secs = elapsed(t0, t1);
-        std::printf("[phaseD:submit]  %zu transfers queued in %.4f sec (%.0f ops/sec — НЕ durable, только заморозка+постановка в очередь)\n",
+        std::printf("[phaseD:submit]  %zu transfers queued in %.4f sec (%.0f ops/sec - NOT durable, only freeze + enqueue)\n",
                     n_transfers, submit_secs, n_transfers / submit_secs);
 
         constexpr std::size_t safety_margin = 20ull * 1024 * 1024;
@@ -228,11 +228,11 @@ namespace transfer_bench {
         double commit_secs = elapsed(t1, t2);
         double unrelated_secs = commit_secs;
 
-        std::printf("[phaseD:unrelated] %zu НЕСВЯЗАННЫХ апдейтов user-кучи ПАРАЛЛЕЛЬНО с коммитом переводов, %.4f sec (%.0f ops/sec)\n",
+        std::printf("[phaseD:unrelated] %zu UNRELATED user-heap updates IN PARALLEL with the transfer commit, %.4f sec (%.0f ops/sec)\n",
                     unrelated_updates, unrelated_secs, unrelated_updates / unrelated_secs);
-        std::printf("[phaseD:commit]  %zu transfers durably committed (msync) in %.4f sec (%.0f ops/sec — РЕАЛЬНАЯ durable-скорость)\n",
+        std::printf("[phaseD:commit]  %zu transfers durably committed (msync) in %.4f sec (%.0f ops/sec - REAL durable speed)\n",
                     n_transfers, commit_secs, n_transfers / commit_secs);
-        std::printf("[phaseD:ratio]   отправка быстрее коммита в %.1fx раз\n", commit_secs / submit_secs);
+        std::printf("[phaseD:ratio]   submission is %.1fx faster than commit\n", commit_secs / submit_secs);
 
         running = false;
         requests.stop();
@@ -250,13 +250,13 @@ namespace transfer_bench {
             }
         }
         std::printf(ok ? "[phaseD:verify] ALL %d ACCOUNTS OK\n" : "[phaseD:verify] FAILURES FOUND\n", n_slots);
-        std::printf("[phaseD:compact] итоговый garbage_ratio=%.4f (компакция срабатывала при >=0.5 внутри writer'а)\n", table.garbage_ratio());
+        std::printf("[phaseD:compact] final garbage_ratio=%.4f (compaction fired at >=0.5 inside the writer)\n", table.garbage_ratio());
     }
 
 } // namespace transfer_bench
 
 // =====================================================================
-// Фаза E: recreate() — CREATE поверх занятого id.
+// Phase E: recreate(), a CREATE over an occupied id.
 // =====================================================================
 namespace recreate_bench {
 
@@ -287,7 +287,7 @@ using profile_local_storage_spec = storage::storage_spec<storage::durability::lo
 
 namespace recreate_bench {
 
-    // ---- E1: local_sync, recreate() + compact() (Вариант 1) ---------------
+    // ---- E1: local_sync, recreate() + compact() (Variant 1) ---------------
     bool run_local() {
         std::remove("stress_heap_recreate_local.db");
         bool ok = true;
@@ -302,7 +302,7 @@ namespace recreate_bench {
         for (int i = 0; i < n_profiles; ++i) {
             storage::record_id id = (storage::record_id)(i + 1);
             profile p{}; set_name(p, names[i % 10]); p.version = 0;
-            table.recreate(id, p); // recreate() на свежий id обязан вести себя как create()
+            table.recreate(id, p); // recreate() on a fresh id must behave like create()
             ids[i] = id;
             std::memcpy(expected[i].name, p.name, sizeof(p.name));
             expected[i].version = 0;
@@ -340,7 +340,7 @@ namespace recreate_bench {
         for (int i = 0; i < n_profiles; ++i) {
             const profile* p = table.get<profile>(ids[i]);
             if (!p || !matches(*p, expected[i])) {
-                std::printf("[phaseE1:verify] slot %d MISMATCH after recreate-раунды\n", i);
+                std::printf("[phaseE1:verify] slot %d MISMATCH after recreate rounds\n", i);
                 ok = false;
             }
         }
@@ -356,25 +356,25 @@ namespace recreate_bench {
             table.compact(scratch, scratch_data);
 
             if (table.live_bytes() != expected_live) {
-                std::printf("[phaseE1:compact] live_bytes MISMATCH после compact(): expected=%zu got=%zu\n",
+                std::printf("[phaseE1:compact] live_bytes MISMATCH after compact(): expected=%zu got=%zu\n",
                             expected_live, table.live_bytes());
                 ok = false;
             }
             double expected_floor = 1.0 - (double)one_size / (double)record_stride;
             if (std::abs(table.garbage_ratio() - expected_floor) > 1e-9) {
-                std::printf("[phaseE1:compact] garbage_ratio МИМО пола: expected=%.6f got=%.6f\n",
+                std::printf("[phaseE1:compact] garbage_ratio OFF the floor: expected=%.6f got=%.6f\n",
                             expected_floor, table.garbage_ratio());
                 ok = false;
             }
             for (int i = 0; i < n_profiles; ++i) {
                 const profile* p = table.get<profile>(ids[i]);
                 if (!p || !matches(*p, expected[i])) {
-                    std::printf("[phaseE1:compact] slot %d MISMATCH после compact()\n", i);
+                    std::printf("[phaseE1:compact] slot %d MISMATCH after compact()\n", i);
                     ok = false;
                 }
             }
             ::close(scratch_fd);
-            std::printf("[phaseE1:compact] ok, live_bytes=%zu garbage_ratio=%.4f (пол=%.4f)\n",
+            std::printf("[phaseE1:compact] ok, live_bytes=%zu garbage_ratio=%.4f (floor=%.4f)\n",
                         table.live_bytes(), table.garbage_ratio(), expected_floor);
         }
 
@@ -387,7 +387,7 @@ namespace recreate_bench {
                 ok = false;
             }
             if (table.get<profile>(ids[0]) != nullptr) {
-                std::printf("[phaseE1:destroy] slot 0 всё ещё жив после destroy()\n");
+                std::printf("[phaseE1:destroy] slot 0 still alive after destroy()\n");
                 ok = false;
             }
         }
@@ -430,7 +430,7 @@ namespace recreate_bench {
                 expected[slot].version = p.version;
             }
 
-            ::close(fd); // "краш"
+            ::close(fd); // "crash"
         }
 
         {
@@ -449,14 +449,14 @@ namespace recreate_bench {
             for (int i = 0; i < n_profiles; ++i) {
                 const profile* p = db.get<profile>(ids[i]);
                 if (!p || !matches(*p, expected[i])) {
-                    std::printf("[phaseE2:recover] slot %d MISMATCH после recover()\n", i);
+                    std::printf("[phaseE2:recover] slot %d MISMATCH after recover()\n", i);
                     ok = false;
                 }
             }
             ::close(fd);
         }
 
-        std::printf(ok ? "[phaseE2] recreate()+recover() OK: live_bytes корректен после %d раундов на id\n" : "[phaseE2] FAILURES FOUND\n", n_rounds);
+        std::printf(ok ? "[phaseE2] recreate()+recover() OK: live_bytes correct after %d rounds on id\n" : "[phaseE2] FAILURES FOUND\n", n_rounds);
         return ok;
     }
 
@@ -469,11 +469,11 @@ namespace recreate_bench {
 } // namespace recreate_bench
 
 // =====================================================================
-// Фаза F: background_compact() (Вариант 2) под конкурентной нагрузкой —
-// писатель (через batch_commit + mutex) и компактор в отдельном потоке,
-// оба на одном mutex. В оригинале этого сценария не было (компакция была
-// отдельной темой) — добавлено специально, чтобы оба варианта компакции
-// были на практике под нагрузкой, не только в юнит-проверке E1.
+// Phase F: background_compact() (Variant 2) under a concurrent load:
+// the writer (via batch_commit + mutex) and the compactor in a separate thread,
+// both on the same mutex. The original had no such scenario (compaction was a
+// separate topic); it was added so that both compaction variants run under
+// load in practice, not only in the E1 unit check.
 // =====================================================================
 namespace background_bench {
 
@@ -495,7 +495,7 @@ namespace background_bench {
                                   t.update<&app::account::balance>(r.id, r.new_balance);
                                   committed.fetch_add(1, std::memory_order_relaxed);
                               },
-                              [](storage::storage<spec>&) {}, // post_batch — компактор отдельным потоком, тут не нужен
+                              [](storage::storage<spec>&) {}, // post_batch: the compactor runs in a separate thread, not needed here
                               /*max_batch=*/500, std::chrono::milliseconds(2));
     }
 
@@ -545,14 +545,14 @@ namespace background_bench {
         compactor_running = false;
         compactor.join();
 
-        // финальная докатка синхронно — гарантированно отражает всё до последнего committed
+        // final synchronous catch-up, guaranteed to reflect everything up to the last committed
         storage::background_compact(table, mu, "stress_heap_bg_compact.db.tmp", "stress_heap_bg_compact.db", spec::capacity,
                                                 "stress_heap_bg_compact.db.data.tmp", "stress_heap_bg_compact.db.data");
 
         double secs = elapsed(t0, t1);
-        std::printf("[phaseF:background_compact] %zu updates под %zu фоновыми компакциями, %.4f sec (%.0f ops/sec, durable)\n",
+        std::printf("[phaseF:background_compact] %zu updates under %zu background compactions, %.4f sec (%.0f ops/sec, durable)\n",
                     n_ops, compactions.load(), secs, n_ops / secs);
-        std::printf("[phaseF:background_compact] итоговый garbage_ratio=%.4f (компакция срабатывала каждые ~30k committed)\n",
+        std::printf("[phaseF:background_compact] final garbage_ratio=%.4f (compaction fired every ~30k committed)\n",
                     table.garbage_ratio());
 
         bool ok = true;
@@ -564,7 +564,7 @@ namespace background_bench {
                 ok = false;
             }
         }
-        std::printf(ok ? "[phaseF:verify] ALL %d ACCOUNTS OK ПОД КОНКУРЕНТНОЙ КОМПАКЦИЕЙ\n" : "[phaseF:verify] FAILURES FOUND\n", n_accounts);
+        std::printf(ok ? "[phaseF:verify] ALL %d ACCOUNTS OK UNDER CONCURRENT COMPACTION\n" : "[phaseF:verify] FAILURES FOUND\n", n_accounts);
     }
 
 } // namespace background_bench
@@ -582,9 +582,9 @@ int main() {
     {
         int fd = -1;
         std::byte* base = open_mmap(path, fd, capacity);
-        storage::storage<> db(base); // default spec = shared, T нигде не регистрируется
+        storage::storage<> db(base); // default spec = shared, T is never registered
 
-        // ---- Фаза A: создаём все 10 слотов один раз ----------------------
+        // ---- Phase A: create all 10 slots once ----------------------
         auto t_a0 = std::chrono::steady_clock::now();
         for (int slot = 0; slot < n_slots; ++slot) {
             app::user u{};
@@ -602,7 +602,7 @@ int main() {
         auto t_a1 = std::chrono::steady_clock::now();
         std::printf("[phaseA:create] %zu ops in %.4f sec\n", creates, elapsed(t_a0, t_a1));
 
-        // ---- Фаза B: чистые update, round-robin по слотам и по полю -------
+        // ---- Phase B: pure updates, round-robin over slots and fields -------
         auto t_b0 = std::chrono::steady_clock::now();
         const std::size_t target_b = (std::size_t)(target * 0.7);
         std::size_t i = 0;
@@ -626,7 +626,7 @@ int main() {
         std::printf("[phaseB:update] %zu ops in %.4f sec (%.0f ops/sec)\n",
                     updates, elapsed(t_b0, t_b1), updates / elapsed(t_b0, t_b1));
 
-        // ---- Фаза C: destroy+recreate, тоже round-robin -------------------
+        // ---- Phase C: destroy+recreate, also round-robin -------------------
         auto t_c0 = std::chrono::steady_clock::now();
         std::size_t c_ops = 0;
         std::size_t j = 0;
@@ -659,14 +659,14 @@ int main() {
                     creates, updates, destroys,
                     db.current_offset() / (1024.0 * 1024.0));
 
-        ::close(fd); // "краш"
+        ::close(fd); // "crash"
     }
     auto t_after_load = std::chrono::steady_clock::now();
     std::printf("[perf] total load phase: %.3f sec, %.1f MB/sec\n",
                 elapsed(t_start, t_after_load),
                 (target / (1024.0 * 1024.0)) / elapsed(t_start, t_after_load));
 
-    // ---- Фаза 2: recovery на shared-куче -------------------------------
+    // ---- Phase 2: recovery on the shared heap -------------------------------
     auto t_recover_start = std::chrono::steady_clock::now();
     bool phase1_ok = true;
     {
@@ -706,16 +706,16 @@ int main() {
         }
         std::printf(phase1_ok ? "[verify] ALL %d ALIVE SLOTS OK\n" : "[verify] FAILURES FOUND\n", n_slots);
 
-        std::printf("\n=== Фаза D: переводы через local_sync + writer-поток (compact() блокирующая) ===\n");
+        std::printf("\n=== Phase D: transfers through local_sync + a writer thread (compact() is blocking) ===\n");
         transfer_bench::run(db, slots);
 
         ::close(fd);
     }
 
-    std::printf("\n=== Фаза E: recreate() — CREATE поверх занятого id ===\n");
+    std::printf("\n=== Phase E: recreate(), a CREATE over an occupied id ===\n");
     bool phaseE_ok = recreate_bench::run_all();
 
-    std::printf("\n=== Фаза F: background_compact() под конкурентной нагрузкой ===\n");
+    std::printf("\n=== Phase F: background_compact() under a concurrent load ===\n");
     background_bench::run();
 
     return (phase1_ok && phaseE_ok) ? 0 : 1;
