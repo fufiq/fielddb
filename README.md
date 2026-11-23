@@ -121,4 +121,5 @@ direction and review.
 
 ## License
 
-No license has been chosen yet; until one is added, all rights are reserved.
+Licensed under the GNU General Public License, version 3 or (at your option) any later version. See [`LICENSE`](LICENSE).
+SPDX-License-Identifier: GPL-3.0-or-later
