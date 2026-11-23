@@ -1,0 +1,12 @@
+build/
+build-*/
+*.log
+*.idx
+*.ckp
+*.db
+*.db.data
+*.sx
+fielddb/bench/data/
+fielddb/bench/field_mvcc_*
+fielddb/bench/results/
+__pycache__/
