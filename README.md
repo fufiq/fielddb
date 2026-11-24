@@ -121,5 +121,5 @@ direction and review.
 
 ## License
 
-Licensed under the GNU General Public License, version 3 or (at your option) any later version. See [`LICENSE`](LICENSE).
+GNU General Public License v3.0 or (at your option) any later version; see [`LICENSE`](LICENSE).
 SPDX-License-Identifier: GPL-3.0-or-later
